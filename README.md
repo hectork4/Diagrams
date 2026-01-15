@@ -1,6 +1,6 @@
 # Flujos de Free Bets / Free Winnings
 
-## 1) Legacy Crash – Flujo completo
+## 1)  Crash – Flujo completo
 
 ```mermaid
 flowchart TD
