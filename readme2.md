@@ -1,94 +1,131 @@
-# How to Release a New Game - RGS Architecture Guide
-
----
-
-> **Info Panel**
-> This document describes the complete process for adding and releasing a new game in Blaze's RGS (Remote Gaming Service) architecture, from development to production with slow release.
->
-> **Reference**: This tutorial is based on the **Lotto Beast** implementation as a case study.
+# How to Release a New Game – RGS Architecture Guide
 
 ---
 
 ## Table of Contents
 
-| Section | Description |
-|---------|-------------|
-| [1. General Architecture](#1-general-architecture) | Overview of projects and data flow |
-| [2. Gaming Service (RGS Backend)](#2-gaming-service-rgs-backend) | Game engine, migrations, RNG |
-| [3. Server (OLTP Backend)](#3-server-oltp-backend) | Feature flags, waitlist |
-| [4. Client (Frontend)](#4-client-frontend) | React components, sockets, Redux |
-| [5. Admin Panel](#5-admin-panel) | Game management interface |
-| [6. Step-by-Step Release Process](#6-step-by-step-release-process) | Deployment phases |
-| [7. Release Checklist](#7-release-checklist) | Pre and post-deploy verification |
+1. [Introduction](#1-introduction)
+2. [Architecture Overview](#2-architecture-overview)
+   - 2.1 Projects Involved
+   - 2.2 Migration Packages
+   - 2.3 Data Flow
+3. [Gaming Service Implementation](#3-gaming-service-implementation)
+   - 3.1 Game Engine Structure
+   - 3.2 Engine Class Implementation
+   - 3.3 Game Configuration
+   - 3.4 Database Migrations
+   - 3.5 RNG Implementation (Provably Fair)
+   - 3.6 Game Runner Worker
+4. [Server Implementation](#4-server-implementation)
+   - 4.1 Feature Status System
+   - 4.2 Feature Status Migration
+5. [Client Implementation](#5-client-implementation)
+   - 5.1 Component Structure
+   - 5.2 Route Registration
+   - 5.3 Socket Handlers
+   - 5.4 Navigation Integration
+6. [Admin Panel Implementation](#6-admin-panel-implementation)
+7. [Release Process](#7-release-process)
+   - 7.1 Phase 1: Development (Staging)
+   - 7.2 Phase 2: QA Verification
+   - 7.3 Phase 3: Production Preparation
+   - 7.4 Phase 4: Deploy to Production
+   - 7.5 Phase 5: Slow Release
+8. [Release Checklist](#8-release-checklist)
+9. [Troubleshooting](#9-troubleshooting)
+10. [Reference: Lotto Beast Implementation](#10-reference-lotto-beast-implementation)
+11. [Executive Summary (Non-Technical)](#11-executive-summary-non-technical)
 
 ---
 
-# 1. General Architecture
+## 1. Introduction
 
-## 1.1 Projects Involved
+This document describes the complete process for adding and releasing a new game in Blaze's RGS (Remote Gaming Service) architecture. It covers all components from initial development through production deployment with controlled slow release.
 
-| Project | Repository | Purpose |
-|---------|------------|---------|
-| **gaming-service-betbr** | RGS Backend | Game logic, ticks, bets, RNG |
-| **server-betbr** | OLTP Backend | Feature flags, settings, waitlist |
-| **client-betbr** | Frontend | Game UI, sockets, state |
-| **admin-betbr** | Admin Panel | Management, configuration, release |
+**Reference Implementation**: This tutorial uses the **Lotto Beast** game as a case study, documenting the patterns and configurations used in its successful release.
 
-## 1.2 Migration Packages
+**Target Audience**: Backend engineers, frontend engineers, and release managers involved in game development and deployment.
 
-| Package | Purpose |
-|---------|---------|
-| `@blazecode/gaming-service-pg-controller` | Gaming service migrations (game and bet tables) |
-| `@blazecode/oltp-pg-controller` | Server migrations (general settings) |
-| `@blazecode/subwriter-pg-controller` | Feature status and waitlist migrations |
+**Scope**: This guide covers multiplayer games in the RGS architecture. Single-player games and third-party provider integrations follow different patterns.
 
-## 1.3 Data Flow Diagram
+---
+
+## 2. Architecture Overview
+
+### 2.1 Projects Involved
+
+The game release process touches four main projects, each with specific responsibilities:
+
+| Project | Role | Responsibilities |
+|---------|------|------------------|
+| **gaming-service-betbr** | RGS Backend | Game logic, tick system, bet processing, RNG, settlement |
+| **server-betbr** | OLTP Backend | Feature flags, waitlist management, user settings |
+| **client-betbr** | Frontend | Game UI, animations, socket connections, Redux state |
+| **admin-betbr** | Admin Panel | Game status monitoring, release controls, bet lookup |
+
+### 2.2 Migration Packages
+
+Database changes are managed through dedicated packages. Each package must be versioned and published before deployment.
+
+| Package | Database | Purpose |
+|---------|----------|---------|
+| `@blazecode/gaming-service-pg-controller` | Gaming DB | Game tables, bet tables, partitions, enums |
+| `@blazecode/oltp-pg-controller` | OLTP DB | General settings (legacy) |
+| `@blazecode/subwriter-pg-controller` | Subwriter DB | Feature status, waitlist, feature access |
+
+**Important**: Migrations run automatically during deployment. Always test in staging before production.
+
+### 2.3 Data Flow
+
+The system uses a distributed architecture with real-time communication:
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   Client        │────▶│   Server         │────▶│  Gaming Service │
-│   (React)       │◀────│   (Express)      │◀────│  (RGS)          │
+│     Client      │────▶│      Server      │────▶│  Gaming Service │
+│    (React)      │◀────│    (Express)     │◀────│     (RGS)       │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
         │                       │                        │
         ▼                       ▼                        ▼
    Socket.IO              Feature Flags            Game Ticks
-   Updates                Waitlist                 Bets
-                          Settings                 Settlements
+   Real-time              Waitlist                 Bet Processing
+   Updates                Access Control           Settlements
 ```
 
----
-
-# 2. Gaming Service (RGS Backend)
-
-## 2.1 Game Structure
-
-> **File Location**
-> `/packages/games/engines/{game-name}-engine/`
-
-**Directory Structure:**
-
-| Path | Purpose |
-|------|---------|
-| `index.js` | Main engine class |
-| `config.js` | Configuration (timing, limits, multipliers) |
-| `workers/game-runner.js` | Main game loop (ticks) |
-| `workers/settlement-worker.js` | Settlement process |
-| `repos/{game}-games-repo.js` | Games repository |
-| `repos/{game}-bets-repo.js` | Bets repository |
-| `services/{game}-outcomes-service.js` | Determine winners/losers |
-| `services/{game}-marshalling-service.js` | Format responses |
-| `services/{game}-validator-service.js` | Specific validations |
-| `services/{game}-admin-service.js` | Admin queries |
-| `utils/calculations.js` | Multiplier calculations |
-| `utils/payload-utils.js` | Payload helpers |
-| `utils/tick-game-specific.js` | Game-specific tick fields |
-| `tests/` | Game tests |
+**Key flows**:
+- **Game ticks**: Gaming Service → Socket.IO → Client (every `tickMs`)
+- **Bet placement**: Client → Server → Gaming Service → Database
+- **Access control**: Client → Server (feature status check) → Allow/Deny
 
 ---
 
-## 2.2 Create the Engine Class
+## 3. Gaming Service Implementation
 
-> **File**: `/packages/games/engines/{game}-engine/index.js`
+### 3.1 Game Engine Structure
+
+Each game is implemented as an "engine" following a standardized structure.
+
+**Location**: `/packages/games/engines/{game-name}-engine/`
+
+| File/Directory | Purpose |
+|----------------|---------|
+| `index.js` | Main engine class extending `MultiplayerEngine` |
+| `config.js` | Game configuration (timing, limits, multipliers) |
+| `workers/game-runner.js` | Background process that runs game ticks |
+| `workers/settlement-worker.js` | Background process for bet settlement |
+| `repos/{game}-games-repo.js` | Database queries for game records |
+| `repos/{game}-bets-repo.js` | Database queries for bet records |
+| `services/{game}-outcomes-service.js` | Win/loss determination logic |
+| `services/{game}-marshalling-service.js` | Response formatting |
+| `services/{game}-validator-service.js` | Bet validation rules |
+| `utils/calculations.js` | Multiplier and payout calculations |
+| `utils/tick-game-specific.js` | Custom fields added to each tick |
+| `tests/` | Unit and integration tests |
+
+### 3.2 Engine Class Implementation
+
+The engine class extends `MultiplayerEngine` and implements game-specific methods.
+
+**File**: `/packages/games/engines/{game}-engine/index.js`
 
 ```javascript
 const MultiplayerEngine = require('../multiplayer-engine');
@@ -133,24 +170,31 @@ class NewGameEngine extends MultiplayerEngine {
 module.exports = NewGameEngine;
 ```
 
----
+**Required methods**:
+- `buildConfig()`: Returns game configuration object
+- `getRng()`: Returns the RNG function for Provably Fair
+- `getAddGameSpecificFields()`: Returns function that adds custom tick fields
+- `getSettlementFn()`: Returns function that determines bet outcomes
+- `getValidatorService()`: Returns validation service for bet rules
 
-## 2.3 Game Configuration
+### 3.3 Game Configuration
 
-> **File**: `/packages/games/engines/{game}-engine/config.js`
+The configuration file defines all game parameters.
+
+**File**: `/packages/games/engines/{game}-engine/config.js`
 
 ```javascript
 module.exports = {
   gameType: 'new_game',
   gameName: 'NewGame',
-  rooms: [1],  // Available rooms
+  rooms: [1],
 
-  betParams: ['target', 'bet_type'],  // Bet parameters
+  betParams: ['target', 'bet_type'],
 
   limits: {
     minBet: 0.1,
     maxBet: 100000,
-    maxProfit: 5000000,  // Maximum payout per round
+    maxProfit: 5000000,
   },
 
   rules: {
@@ -158,14 +202,14 @@ module.exports = {
   },
 
   multipliers: {
-    // Define game multipliers
+    // Game-specific multiplier definitions
   },
 
   timing: {
-    preRoundMs: 15000,    // Time before rolling
-    postRoundMs: 5000,    // Time after complete
-    rollingMs: 10000,     // Rolling duration
-    tickMs: 1000,         // Update frequency
+    preRoundMs: 15000,
+    postRoundMs: 5000,
+    rollingMs: 10000,
+    tickMs: 1000,
   },
 
   database: {
@@ -182,44 +226,31 @@ module.exports = {
 };
 ```
 
-**Configuration Parameters:**
+**Configuration parameters explained**:
 
-| Parameter | Description | Example |
-|-----------|-------------|---------|
-| `gameType` | Internal game identifier | `'new_game'` |
-| `gameName` | Display name | `'NewGame'` |
-| `rooms` | Available room IDs | `[1]` |
-| `limits.minBet` | Minimum bet amount | `0.1` |
-| `limits.maxBet` | Maximum bet amount | `100000` |
-| `limits.maxProfit` | Maximum payout per round | `5000000` |
-| `timing.preRoundMs` | Betting window duration | `15000` |
-| `timing.rollingMs` | Animation/reveal duration | `10000` |
-| `timing.postRoundMs` | Results display duration | `5000` |
-| `timing.tickMs` | Update broadcast frequency | `1000` |
+| Parameter | Description | Example (Lotto Beast) |
+|-----------|-------------|----------------------|
+| `timing.preRoundMs` | Betting window before rolling starts | 15500ms |
+| `timing.rollingMs` | Animation/reveal duration | 12000ms |
+| `timing.postRoundMs` | Results display before next round | 5000ms |
+| `timing.tickMs` | Broadcast frequency to clients | 1000ms |
+| `limits.minBet` | Minimum allowed bet | 0.1 |
+| `limits.maxBet` | Maximum allowed bet | 100000 |
+| `limits.maxProfit` | Maximum payout per round (risk control) | 5000000 |
+| `rules.maxBetsPerRound` | Bets per user per round | 50 |
 
----
+### 3.4 Database Migrations
 
-## 2.4 Register the Engine
+#### 3.4.1 Games and Bets Tables
 
-> **File**: `/packages/rgs-core/engine-factory.js`
+**File**: `@blazecode/gaming-service-pg-controller/src/migrations/YYYYMMDDHHMMSS-new-game.js`
 
-```javascript
-const NewGameEngine = require('../games/engines/new-game-engine/index.js');
+The migration must create:
 
-const engines = {
-  'new-game': new NewGameEngine({ db: dbPool }),
-  // ... other engines
-};
-```
-
----
-
-## 2.5 Create Database Migration
-
-> **Warning Panel**
-> Database migrations are critical. Always test in staging before production.
-
-> **File**: `@blazecode/gaming-service-pg-controller/src/migrations/YYYYMMDDHHMMSS-new-game.js`
+1. **Status enum**: Game state machine values
+2. **Games table**: One record per game round
+3. **Bets table**: Partitioned by month for performance
+4. **Enum updates**: Add game to existing bet/transaction enums
 
 ```javascript
 'use strict';
@@ -233,45 +264,22 @@ module.exports = {
 
     // 2. Create games table
     await queryInterface.createTable('new_game_games', {
-      id: {
-        type: Sequelize.BIGINT,
-        primaryKey: true,
-      },
-      status: {
-        type: 'enum_new_game_games_status',
-        allowNull: false,
-        defaultValue: 'waiting',
-      },
-      // Game-specific fields (e.g., winning_number)
+      id: { type: Sequelize.BIGINT, primaryKey: true },
+      status: { type: 'enum_new_game_games_status', allowNull: false, defaultValue: 'waiting' },
+      // Game-specific result fields
       result_field_1: Sequelize.INTEGER,
       result_field_2: Sequelize.INTEGER,
-
-      multiplayer_game_id: {
-        type: Sequelize.INTEGER,
-        references: { model: 'multiplayer_games', key: 'id' },
-      },
-      server_roll_id: {
-        type: Sequelize.UUID,
-        references: { model: 'server_rolls', key: 'id' },
-      },
-      created_at: {
-        type: Sequelize.DATE,
-        allowNull: false,
-        defaultValue: Sequelize.literal('CURRENT_TIMESTAMP'),
-      },
-      updated_at: {
-        type: Sequelize.DATE,
-        allowNull: false,
-        defaultValue: Sequelize.literal('CURRENT_TIMESTAMP'),
-      },
+      multiplayer_game_id: { type: Sequelize.INTEGER, references: { model: 'multiplayer_games', key: 'id' } },
+      server_roll_id: { type: Sequelize.UUID, references: { model: 'server_rolls', key: 'id' } },
+      created_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
+      updated_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
     });
 
     // 3. Create indexes
     await queryInterface.addIndex('new_game_games', ['status']);
     await queryInterface.addIndex('new_game_games', ['multiplayer_game_id']);
-    await queryInterface.addIndex('new_game_games', ['server_roll_id']);
 
-    // 4. Create bets table (partitioned by month)
+    // 4. Create partitioned bets table
     await queryInterface.sequelize.query(`
       CREATE TABLE new_game_bets (
         id BIGINT NOT NULL,
@@ -289,30 +297,18 @@ module.exports = {
       ) PARTITION BY RANGE (created_at);
     `);
 
-    // 5. Create monthly partitions (2 years ahead)
-    const partitions = [
-      ['2025_01', '2025-01-01', '2025-02-01'],
-      ['2025_02', '2025-02-01', '2025-03-01'],
-      ['2025_03', '2025-03-01', '2025-04-01'],
-      // ... continue for 24 months
-    ];
-
-    for (const [name, start, end] of partitions) {
+    // 5. Create 24 monthly partitions
+    const months = generateMonthlyPartitions(2025, 2027);
+    for (const [name, start, end] of months) {
       await queryInterface.sequelize.query(`
         CREATE TABLE new_game_bets_${name} PARTITION OF new_game_bets
         FOR VALUES FROM ('${start}') TO ('${end}');
       `);
     }
 
-    // 6. Add to bet type enum
-    await queryInterface.sequelize.query(`
-      ALTER TYPE enum_bets_type ADD VALUE IF NOT EXISTS 'new_game';
-    `);
-
-    // 7. Add to transaction type enum
-    await queryInterface.sequelize.query(`
-      ALTER TYPE enum_transactions_type ADD VALUE IF NOT EXISTS 'new_game';
-    `);
+    // 6. Add to enums
+    await queryInterface.sequelize.query(`ALTER TYPE enum_bets_type ADD VALUE IF NOT EXISTS 'new_game';`);
+    await queryInterface.sequelize.query(`ALTER TYPE enum_transactions_type ADD VALUE IF NOT EXISTS 'new_game';`);
   },
 
   async down(queryInterface) {
@@ -323,29 +319,18 @@ module.exports = {
 };
 ```
 
-**Migration Checklist:**
+**Important**: Bet tables use monthly partitioning for performance. Create partitions for at least 2 years ahead.
 
-| Item | Status |
-|------|--------|
-| Create game status enum | Required |
-| Create games table | Required |
-| Create bets table (partitioned) | Required |
-| Add indexes | Required |
-| Add to enum_bets_type | Required |
-| Add to enum_transactions_type | Required |
+#### 3.4.2 Multiplayer Games Seed
 
----
-
-## 2.6 Create Seed for multiplayer_games
-
-> **File**: `@blazecode/gaming-service-pg-controller/src/seeds/YYYYMMDDHHMMSS-new-game.js`
+**File**: `@blazecode/gaming-service-pg-controller/src/seeds/YYYYMMDDHHMMSS-new-game.js`
 
 ```javascript
 'use strict';
 
 module.exports = {
   async up(queryInterface) {
-    // Register in multiplayer_games
+    // Register game in multiplayer_games
     await queryInterface.sequelize.query(`
       INSERT INTO multiplayer_games (id, game, description, active, slug, bonus_round_available, created_at, updated_at)
       VALUES (
@@ -361,7 +346,7 @@ module.exports = {
       ON CONFLICT (game) DO NOTHING;
     `);
 
-    // Create initial setting (disabled)
+    // Create setting (disabled by default)
     await queryInterface.sequelize.query(`
       INSERT INTO settings (key, value, created_at, updated_at)
       VALUES ('new_game_enabled', '0', NOW(), NOW())
@@ -370,57 +355,52 @@ module.exports = {
   },
 
   async down(queryInterface) {
-    await queryInterface.sequelize.query(`
-      DELETE FROM multiplayer_games WHERE game = 'new_game_room_1';
-    `);
-    await queryInterface.sequelize.query(`
-      DELETE FROM settings WHERE key = 'new_game_enabled';
-    `);
+    await queryInterface.sequelize.query(`DELETE FROM multiplayer_games WHERE game = 'new_game_room_1';`);
+    await queryInterface.sequelize.query(`DELETE FROM settings WHERE key = 'new_game_enabled';`);
   },
 };
 ```
 
----
+### 3.5 RNG Implementation (Provably Fair)
 
-## 2.7 Implement RNG (Provably Fair)
+The RNG function converts a SHA-256 hash into deterministic game results.
 
-> **File**: `/packages/math/new-game/new-game-rng.js`
+**File**: `/packages/math/new-game/new-game-rng.js`
 
 ```javascript
 const { generateCoreRngValues } = require('../core-rng');
 
 /**
- * Converts a SHA-256 hash into the game result
- * @param {string} hash - 64-character hexadecimal hash
- * @returns {Object} - Game result
+ * Converts SHA-256 hash to game results
+ * @param {string} hash - 64 hex characters from server roll
+ * @returns {Object} Game-specific result values
  */
 const getNewGameRng = (hash) => {
-  // generateCoreRngValues divides the hash into segments
-  // and generates values in range [0, 2^52)
   const rngValues = generateCoreRngValues(hash);
 
   // Map to game-specific results
-  // Example: 5 numbers between 0-9999
   const results = rngValues.map((value) => value % 10000);
 
   return {
     result_1: results[0],
     result_2: results[1],
-    // ...
+    // ... additional result fields
   };
 };
 
 module.exports = getNewGameRng;
 ```
 
-> **Note Panel**
-> The RNG must be deterministic based on the hash for Provably Fair verification.
+**Provably Fair requirements**:
+- RNG must be deterministic (same hash → same result)
+- Hash comes from `server_rolls` table
+- Results can be verified by players
 
----
+### 3.6 Game Runner Worker
 
-## 2.8 Game Runner (Worker)
+The game runner executes ticks at regular intervals.
 
-> **File**: `/packages/games/engines/new-game-engine/workers/game-runner.js`
+**File**: `/packages/games/engines/new-game-engine/workers/game-runner.js`
 
 ```javascript
 const NewGameEngine = require('../index');
@@ -445,8 +425,7 @@ const runGameLoop = async () => {
 runGameLoop();
 ```
 
-## 2.9 Add Script to package.json
-
+**Add to package.json**:
 ```json
 {
   "scripts": {
@@ -455,13 +434,44 @@ runGameLoop();
 }
 ```
 
+### 3.7 Register Engine
+
+**File**: `/packages/rgs-core/engine-factory.js`
+
+```javascript
+const NewGameEngine = require('../games/engines/new-game-engine/index.js');
+
+const engines = {
+  'new-game': new NewGameEngine({ db: dbPool }),
+  // ... other engines
+};
+```
+
 ---
 
-# 3. Server (OLTP Backend)
+## 4. Server Implementation
 
-## 3.1 Feature Status Migration
+### 4.1 Feature Status System
 
-> **File**: `@blazecode/subwriter-pg-controller/src/seeds/YYYYMMDDHHMMSS-add-new-game-feature-status.js`
+The feature status system controls game access with five states:
+
+| Status | Game Access | Waitlist | Use Case |
+|--------|-------------|----------|----------|
+| `globally_available` | Everyone | N/A | Public release |
+| `restricted_access` | Whitelist only | Closed | Beta testing |
+| `waitlist_maintenance` | Everyone | Closed | Normal operation, waitlist off |
+| `game_maintenance` | Nobody | Open | Pre-release hype |
+| `global_maintenance` | Nobody | Closed | Emergency shutdown |
+
+**State progression for release**:
+```
+game_maintenance → restricted_access → globally_available
+     (Dev)            (Beta)              (Public)
+```
+
+### 4.2 Feature Status Migration
+
+**File**: `@blazecode/subwriter-pg-controller/src/seeds/YYYYMMDDHHMMSS-add-new-game-feature-status.js`
 
 ```javascript
 'use strict';
@@ -470,179 +480,51 @@ module.exports = {
   async up(queryInterface) {
     await queryInterface.sequelize.query(`
       INSERT INTO feature_status (id, feature_name, status, created_at, updated_at)
-      VALUES (
-        DEFAULT,
-        'new_game_room_1',
-        'game_maintenance',
-        NOW(),
-        NOW()
-      )
+      VALUES (DEFAULT, 'new_game_room_1', 'game_maintenance', NOW(), NOW())
       ON CONFLICT (feature_name) DO NOTHING;
     `);
   },
 
   async down(queryInterface) {
-    await queryInterface.sequelize.query(`
-      DELETE FROM feature_status WHERE feature_name = 'new_game_room_1';
-    `);
+    await queryInterface.sequelize.query(`DELETE FROM feature_status WHERE feature_name = 'new_game_room_1';`);
   },
 };
 ```
 
----
+### 4.3 Update Constants
 
-## 3.2 Feature Status System
-
-**Available States:**
-
-| Status | Description | Game Access | Waitlist Access |
-|--------|-------------|-------------|-----------------|
-| `globally_available` | Everyone can play | YES | N/A |
-| `restricted_access` | Only whitelisted users | YES (whitelist only) | NO |
-| `waitlist_maintenance` | Disable waitlist signup | YES | NO |
-| `game_maintenance` | Disable game play | NO | YES |
-| `global_maintenance` | Everything disabled | NO | NO |
-
-**State Transition Diagram:**
-
-```
-game_maintenance (Initial)
-        │
-        ▼
-restricted_access (Beta Testing)
-        │
-        ▼
-globally_available (Public Release)
-```
-
----
-
-## 3.3 Add to Constants
-
-> **File**: `/packages/waitlist-feature/src/constants.js`
+**File**: `/packages/waitlist-feature/src/constants.js`
 
 ```javascript
 const FEATURES = [
-  // ... other games
+  // ... existing games
   'new_game_room_1',
 ];
 ```
 
 ---
 
-## 3.4 Update Package Version
+## 5. Client Implementation
 
-After creating migrations, update dependencies:
+### 5.1 Component Structure
 
-```json
-{
-  "dependencies": {
-    "@blazecode/gaming-service-pg-controller": "^X.Y.Z",
-    "@blazecode/subwriter-pg-controller": "^X.Y.Z"
-  }
-}
-```
-
----
-
-# 4. Client (Frontend)
-
-## 4.1 Component Structure
-
-> **Location**: `/src/casino/originals/new-game/`
+**Location**: `/src/casino/originals/new-game/`
 
 | Path | Purpose |
 |------|---------|
-| `NewGame.js` | Main component |
-| `NewGame.module.css` | Styles |
-| `constants.js` | Game constants |
-| `logic/index.js` | Redux actions/reducers |
-| `hooks/useGameHooks.js` | Asset loading |
-| `hooks/use-animation.js` | Animations |
-| `controller/` | Betting UI |
-| `canvas/` | Rendering (Pixi.js) |
-| `LiveBetTable/` | Bets table |
-| `modal/` | Modals |
-| `assets/` | Images, animations |
+| `NewGame.js` | Main component (entry point) |
+| `constants.js` | Game-specific constants |
+| `logic/index.js` | Redux reducer and actions |
+| `hooks/useGameHooks.js` | Asset loading, initialization |
+| `hooks/use-animation.js` | Animation controllers |
+| `controller/` | Betting UI components |
+| `canvas/` | Pixi.js rendering |
+| `LiveBetTable/` | Real-time bet display |
+| `assets/` | Images, Spine animations |
 
----
+### 5.2 Route Registration
 
-## 4.2 Register the Game
-
-> **File**: `/src/app/constants/original-games.js`
-
-```javascript
-const ORIGINAL_GAMES = {
-  // ... other games
-  new_game: 'new-game',
-};
-```
-
----
-
-## 4.3 Game Configuration
-
-> **File**: `/src/casino/originals/core/config/games-config.js`
-
-```javascript
-export const GAME_CONFIGS = {
-  'new-game': {
-    displayName: 'New Game',
-    cacheTime: {
-      history: 60000,
-      limits: 300000,
-      lastGame: 30000,
-    },
-    roomId: 'new_game_room_1',
-  },
-};
-```
-
----
-
-## 4.4 Main Component
-
-> **File**: `/src/casino/originals/new-game/NewGame.js`
-
-```javascript
-import React from 'react';
-import { useInitGame, useLoadAssets } from './hooks/useGameHooks';
-import LayoutGame from '../core/layout/LayoutGame';
-
-const NewGame = ({ selectedWalletData }) => {
-  const gameSlug = 'new-game';
-
-  const { gameEnabled } = useInitGame({
-    selectedWalletData,
-    gameSlug,
-  });
-
-  const { isLoading, progress } = useLoadAssets({ gameSlug });
-
-  if (isLoading) {
-    return <LoadingScreen progress={progress} />;
-  }
-
-  return (
-    <LayoutGame
-      gameSlug={gameSlug}
-      gameEnabled={gameEnabled}
-      feature="new_game_enabled"
-      featureRoom="new_game_room_1"
-    >
-      {/* Game content */}
-    </LayoutGame>
-  );
-};
-
-export default NewGame;
-```
-
----
-
-## 4.5 Register Route (Lazy Loading)
-
-> **File**: `/src/casino/CasinoPage.js`
+**File**: `/src/casino/CasinoPage.js`
 
 ```javascript
 import Loadable from 'react-loadable';
@@ -653,60 +535,27 @@ const NewGame = Loadable({
   delay: 1000,
 });
 
-// In the Switch routes:
-<Route path={`${base}/new-game`} component={NewGame} />
-
-// For admin-only during development:
+// During development (admin-only):
 {isAdmin && <Route path={`${base}/new-game`} component={NewGame} />}
+
+// After release (public):
+<Route path={`${base}/new-game`} component={NewGame} />
 ```
 
----
+### 5.3 Socket Handlers
 
-## 4.6 Add Socket Handlers
-
-> **File**: `/src/app/networking/socketio-blaze-originals.js`
+**File**: `/src/app/networking/socketio-blaze-originals.js`
 
 ```javascript
-import { SocketUpdate, SocketUpdateBetsResult } from './handlers/new-game';
-
 this.handlers = {
-  // ... other handlers
   'new_game.tick': new SocketUpdate(store),
   'new_game.user-bets-result': new SocketUpdateBetsResult(store),
 };
 ```
 
----
+### 5.4 Navigation Integration
 
-## 4.7 Redux Store
-
-> **File**: `/src/casino/originals/new-game/logic/index.js`
-
-```javascript
-const initialState = {
-  status: 'waiting',
-  total_eur_bet: 0,
-  total_bets_placed: 0,
-  bets: [],
-  // Game-specific fields
-};
-
-const newGameReducer = createGameRedux({
-  gameSlug: 'new-game',
-  initialState,
-  customReducers: {
-    // Specific reducers
-  },
-});
-
-export default newGameReducer;
-```
-
----
-
-## 4.8 Add to Navigation
-
-> **File**: `/src/app/left-bar/constants.js`
+**File**: `/src/app/left-bar/constants.js`
 
 ```javascript
 {
@@ -722,17 +571,41 @@ export default newGameReducer;
 },
 ```
 
+### 5.5 Game Configuration
+
+**File**: `/src/casino/originals/core/config/games-config.js`
+
+```javascript
+export const GAME_CONFIGS = {
+  'new-game': {
+    displayName: 'New Game',
+    cacheTime: { history: 60000, limits: 300000, lastGame: 30000 },
+    roomId: 'new_game_room_1',
+  },
+};
+```
+
+### 5.6 Game Constants
+
+**File**: `/src/app/constants/original-games.js`
+
+```javascript
+const ORIGINAL_GAMES = {
+  // ... existing games
+  new_game: 'new-game',
+};
+```
+
 ---
 
-# 5. Admin Panel
+## 6. Admin Panel Implementation
 
-## 5.1 Add to Game Status
+### 6.1 Game Status Configuration
 
-> **File**: `/src/casino/game-status/tab-games-status/const.js`
+**File**: `/src/casino/game-status/tab-games-status/const.js`
 
 ```javascript
 export const GAMES_MAP = [
-  // ... other games
   {
     name: 'New Game',
     slug: 'new-game',
@@ -746,85 +619,55 @@ export const GAMES_MAP = [
 ];
 ```
 
----
+### 6.2 Bet Search
 
-## 5.2 Create Bet Search
-
-> **File**: `/src/originals/search-new-game-bet.js`
+**File**: `/src/originals/search-new-game-bet.js`
 
 ```javascript
 import React from 'react';
 import SearchBetForm from './components/SearchBetForm';
 
-const SearchNewGameBet = () => {
-  return (
-    <SearchBetForm
-      gameType="new_game"
-      endpoint="/admin/originals/new-game/bets"
-      fields={['id', 'user_id', 'amount', 'target', 'multiplier', 'status']}
-    />
-  );
-};
+const SearchNewGameBet = () => (
+  <SearchBetForm
+    gameType="new_game"
+    endpoint="/admin/originals/new-game/bets"
+    fields={['id', 'user_id', 'amount', 'target', 'multiplier', 'status']}
+  />
+);
 
 export default SearchNewGameBet;
 ```
 
 ---
 
-## 5.3 Add to Admin Menu
+## 7. Release Process
 
-Add links in the admin navigation for:
-- Game bet search
-- Game configuration
-- Status monitoring
+### 7.1 Phase 1: Development (Staging)
 
----
+**Duration**: 2-4 weeks
 
-# 6. Step-by-Step Release Process
+| Task | Owner | Description |
+|------|-------|-------------|
+| 1.1 | Backend | Create game engine (index.js, config.js) |
+| 1.2 | Backend | Implement RNG function |
+| 1.3 | Backend | Create database migrations |
+| 1.4 | Backend | Create database seeds |
+| 1.5 | Backend | Implement game runner worker |
+| 1.6 | Backend | Write unit and integration tests |
+| 1.7 | Backend | Create feature status migration |
+| 1.8 | Frontend | Create game component |
+| 1.9 | Frontend | Implement UI and animations |
+| 1.10 | Frontend | Add socket handlers |
+| 1.11 | Frontend | Configure Redux store |
+| 1.12 | Frontend | Add route (admin-only) |
+| 1.13 | Admin | Add to game status dashboard |
+| 1.14 | Admin | Create bet search interface |
 
-## Phase 1: Development (Staging)
+### 7.2 Phase 2: QA Verification
 
-### Gaming Service Tasks
+**Duration**: 1-2 weeks
 
-| Task | Status |
-|------|--------|
-| Create game engine | TODO |
-| Implement RNG | TODO |
-| Create DB migrations | TODO |
-| Create seeds | TODO |
-| Implement game runner | TODO |
-| Write tests | TODO |
-
-### Server Tasks
-
-| Task | Status |
-|------|--------|
-| Create feature status migration | TODO |
-| Update feature constants | TODO |
-
-### Client Tasks
-
-| Task | Status |
-|------|--------|
-| Create game component | TODO |
-| Implement UI and animations | TODO |
-| Add socket handlers | TODO |
-| Configure Redux store | TODO |
-| Add route (admin-only) | TODO |
-
-### Admin Tasks
-
-| Task | Status |
-|------|--------|
-| Add to game status | TODO |
-| Create bet search | TODO |
-
----
-
-## Phase 2: QA in Staging
-
-### Run Migrations
-
+**Run migrations**:
 ```bash
 # Gaming Service
 npm run db:migrate
@@ -833,40 +676,45 @@ npm run db:migrate
 npm run db:migrate
 ```
 
-### Verification Checklist
+**Verification checklist**:
 
-| Item | Expected | Status |
-|------|----------|--------|
-| Tables created | `new_game_games`, `new_game_bets` | TODO |
-| Bet partitions | 24 monthly partitions | TODO |
-| Feature status | `game_maintenance` | TODO |
-| Setting | `new_game_enabled` = '0' | TODO |
+| Item | Expected Value | Verified |
+|------|----------------|----------|
+| Games table created | `new_game_games` exists | ☐ |
+| Bets table created | `new_game_bets` with partitions | ☐ |
+| Partitions created | 24 monthly partitions | ☐ |
+| Feature status | `game_maintenance` | ☐ |
+| Setting value | `new_game_enabled = '0'` | ☐ |
+| multiplayer_games record | Active, correct ID | ☐ |
 
-### Testing Checklist
+**Testing checklist**:
 
 | Test | Status |
 |------|--------|
-| Game works as admin | TODO |
-| Game ticks correctly | TODO |
-| Bets work | TODO |
-| Settlements correct | TODO |
-| Mobile tested | TODO |
-| Desktop tested | TODO |
+| Game loads correctly as admin | ☐ |
+| Ticks broadcast at correct interval | ☐ |
+| Bets can be placed | ☐ |
+| Settlements calculate correctly | ☐ |
+| Winnings credited to wallet | ☐ |
+| Mobile responsive | ☐ |
+| Desktop layout correct | ☐ |
 
----
+### 7.3 Phase 3: Production Preparation
 
-## Phase 3: Production Preparation
+**Duration**: 1 week
 
-### Publish Packages
-
+**Publish packages**:
 ```bash
-# From each pg-controller repo
+# From gaming-service-pg-controller repo
+npm version patch
+npm publish
+
+# From subwriter-pg-controller repo
 npm version patch
 npm publish
 ```
 
-### Update Dependencies
-
+**Update dependencies** in all projects:
 ```json
 {
   "@blazecode/gaming-service-pg-controller": "^X.Y.Z",
@@ -874,37 +722,39 @@ npm publish
 }
 ```
 
----
+### 7.4 Phase 4: Deploy to Production
 
-## Phase 4: Deploy to Production
+**Duration**: 1 day
 
-### Deployment Order
+**Deployment order** (critical):
 
-| Order | Service | Command |
-|-------|---------|---------|
-| 1 | Gaming Service | `npm run deploy:production` |
-| 2 | Server | `npm run deploy:production` |
-| 3 | Client | `npm run deploy:production` |
-| 4 | Admin | `npm run deploy:production` |
+| Order | Service | Command | Notes |
+|-------|---------|---------|-------|
+| 1 | Gaming Service | `npm run deploy:production` | Runs migrations |
+| 2 | Server | `npm run deploy:production` | Runs feature status migration |
+| 3 | Client | `npm run deploy:production` | Game accessible to admins |
+| 4 | Admin | `npm run deploy:production` | Status dashboard available |
 
----
+### 7.5 Phase 5: Slow Release
 
-## Phase 5: Slow Release
+The slow release process gradually expands access to ensure stability.
 
-### 5.1 Admin-Only Testing (Day 1)
+#### 7.5.1 Admin-Only Testing (Day 1)
 
 | Setting | Value |
 |---------|-------|
 | `new_game_enabled` | `0` |
 | Feature Status | `game_maintenance` |
-| Access | Admins only via direct route |
+| Access | Admins only (via direct URL) |
 
----
+**Actions**:
+- Test all game functionality in production
+- Verify metrics and logging
+- Check for any production-specific issues
 
-### 5.2 Whitelist/Beta Testing (Days 2-7)
+#### 7.5.2 Whitelist/Beta Testing (Days 2-7)
 
-**Change Feature Status:**
-
+**Change feature status**:
 ```
 PUT /admin/waitlist_feature/new_game_room_1
 {
@@ -913,8 +763,10 @@ PUT /admin/waitlist_feature/new_game_room_1
 }
 ```
 
-**Grant Access to Beta Users:**
+**Enable game setting**:
+- Set `new_game_enabled = 1` in Gaming Service Settings
 
+**Grant access to beta users**:
 ```
 PUT /admin/waitlist_feature/new_game_room_1/change_status/{user_id}
 ```
@@ -925,20 +777,17 @@ PUT /admin/waitlist_feature/new_game_room_1/change_status/{user_id}
 | Feature Status | `restricted_access` |
 | Access | Admins + whitelisted users |
 
----
+#### 7.5.3 Waitlist Phase (Days 8-14) – Optional
 
-### 5.3 Waitlist Phase (Days 8-14)
-
-**Open Waitlist:**
+Use this phase to build hype before public release.
 
 | Setting | Value |
 |---------|-------|
 | Feature Status | `game_maintenance` |
-| Waitlist | Open for signups |
-| Game | Not playable (building hype) |
+| Waitlist | Open (users can sign up) |
+| Game | Not playable |
 
-**Gradually Approve Users:**
-
+**Gradually approve users**:
 ```
 PUT /admin/waitlist_feature/new_game_room_1/bulk_grant_access
 {
@@ -946,154 +795,155 @@ PUT /admin/waitlist_feature/new_game_room_1/bulk_grant_access
 }
 ```
 
----
-
-### 5.4 Global Release
+#### 7.5.4 Global Release
 
 | Setting | Value |
 |---------|-------|
 | `new_game_enabled` | `1` |
 | Feature Status | `globally_available` |
-| Frontend | Remove `isAdmin: true` flag |
-| Navigation | Add to home page/categories |
+| Frontend restriction | Remove `isAdmin: true` |
+
+**Post-release actions**:
+- Add to home page carousel
+- Add to game categories
+- Send user notifications
+- Publish marketing materials
 
 ---
 
-# 7. Release Checklist
+## 8. Release Checklist
 
-## Pre-Deploy Checklist
+### 8.1 Pre-Deploy Checklist
 
-### Gaming Service
-
-| Item | Status |
-|------|--------|
-| Engine implemented and tested | TODO |
-| Migrations created (games, bets, enums) | TODO |
-| Seeds created (multiplayer_games, settings) | TODO |
-| RNG implemented | TODO |
-| Game runner created | TODO |
-| Tests passing | TODO |
-| Package published with new version | TODO |
-
-### Server
+#### Gaming Service
 
 | Item | Status |
 |------|--------|
-| Feature_status migration created | TODO |
-| Constants updated | TODO |
-| Package published with new version | TODO |
+| Engine class implemented | ☐ |
+| Config file complete | ☐ |
+| Games repository implemented | ☐ |
+| Bets repository implemented | ☐ |
+| Outcomes service implemented | ☐ |
+| Validator service implemented | ☐ |
+| Marshalling service implemented | ☐ |
+| RNG function implemented | ☐ |
+| Game runner worker created | ☐ |
+| Migration created (games, bets, enums) | ☐ |
+| Seed created (multiplayer_games, settings) | ☐ |
+| Tests written and passing | ☐ |
+| Engine registered in factory | ☐ |
+| npm script added | ☐ |
+| Package published | ☐ |
 
-### Client
+#### Server
 
 | Item | Status |
 |------|--------|
-| Game component created | TODO |
-| Socket handlers implemented | TODO |
-| Redux store configured | TODO |
-| Route added (admin-only) | TODO |
-| Navigation updated | TODO |
-| Assets uploaded to CDN | TODO |
+| Feature status migration created | ☐ |
+| Constants updated | ☐ |
+| Package published | ☐ |
 
-### Admin
+#### Client
 
 | Item | Status |
 |------|--------|
-| Game status configured | TODO |
-| Bet search implemented | TODO |
+| Game component created | ☐ |
+| Redux store configured | ☐ |
+| Socket handlers implemented | ☐ |
+| Route added (admin-only) | ☐ |
+| Navigation updated | ☐ |
+| Game config added | ☐ |
+| Original games constant added | ☐ |
+| Assets uploaded to CDN | ☐ |
+
+#### Admin
+
+| Item | Status |
+|------|--------|
+| Game status config added | ☐ |
+| Bet search implemented | ☐ |
+
+### 8.2 Post-Deploy Checklist (Staging)
+
+| Item | Status |
+|------|--------|
+| Tables created correctly | ☐ |
+| Partitions verified (24 months) | ☐ |
+| Feature status = `game_maintenance` | ☐ |
+| Setting = `0` (disabled) | ☐ |
+| Game loads for admin | ☐ |
+| Ticks working | ☐ |
+| Bets working | ☐ |
+| Settlements working | ☐ |
+| Sockets updating | ☐ |
+
+### 8.3 Post-Deploy Checklist (Production)
+
+| Item | Status |
+|------|--------|
+| Migrations successful | ☐ |
+| Service health verified | ☐ |
+| Admin testing complete | ☐ |
+| Metrics collecting | ☐ |
+| Logs clean | ☐ |
+| Ready for whitelist | ☐ |
+
+### 8.4 Post-Release Checklist
+
+| Item | Status |
+|------|--------|
+| `isAdmin: true` removed from route | ☐ |
+| `isAdmin: true` removed from navigation | ☐ |
+| Feature status = `globally_available` | ☐ |
+| Setting = `1` (enabled) | ☐ |
+| Added to home page | ☐ |
+| Added to categories | ☐ |
+| User communication sent | ☐ |
 
 ---
 
-## Post-Deploy (Staging) Checklist
+## 9. Troubleshooting
 
-| Item | Status |
-|------|--------|
-| Migrations executed successfully | TODO |
-| Tables and partitions verified | TODO |
-| Feature status in `game_maintenance` | TODO |
-| Setting disabled | TODO |
-| Game works correctly as admin | TODO |
-| Bets work | TODO |
-| Settlements correct | TODO |
-| Sockets update correctly | TODO |
+### 9.1 Game doesn't appear in frontend
 
----
+| Symptom | Cause | Solution |
+|---------|-------|----------|
+| 404 on game route | Route not registered | Add to CasinoPage.js Switch |
+| Game shows but redirects | Feature flag blocking | Check feature_status table |
+| Only works for some users | Admin restriction active | Remove `isAdmin: true` check |
+| Blank screen | Asset loading failed | Check CDN paths in config |
 
-## Post-Deploy (Production) Checklist
+### 9.2 Bets fail
 
-| Item | Status |
-|------|--------|
-| Migrations executed successfully | TODO |
-| Service health verified | TODO |
-| Testing as admin complete | TODO |
-| Whitelist phase started | TODO |
-| Metrics being monitored | TODO |
-| Ready for slow release | TODO |
+| Symptom | Cause | Solution |
+|---------|-------|----------|
+| "Game not enabled" error | Setting disabled | Set `new_game_enabled = 1` |
+| "No access" error | Feature status blocking | Check waitlist feature status |
+| Bet not appearing | Socket not connected | Check socket handler registration |
+| Insufficient funds | Wallet issue | Verify user balance |
 
----
+### 9.3 Ticks not working
 
-## Post-Release Checklist
+| Symptom | Cause | Solution |
+|---------|-------|----------|
+| Game stuck on waiting | Runner not started | Start game runner worker |
+| Ticks not reaching client | Socket room issue | Verify roomId in config |
+| Database errors | Missing tables | Run migrations |
+| No games created | Missing multiplayer_games record | Run seed |
 
-| Item | Status |
-|------|--------|
-| Admin-only restriction removed | TODO |
-| Feature status set to `globally_available` | TODO |
-| Setting enabled | TODO |
-| Added to home page / categories | TODO |
-| User communication sent | TODO |
+### 9.4 Settlement not processing
 
----
-
-# Appendix A: Useful Commands
-
-| Command | Description |
-|---------|-------------|
-| `npm run db:migrate` | Run migrations locally |
-| `npm run db:migrate:status` | Check migration status |
-| `npm run db:migrate:undo` | Rollback last migration |
-| `npm run dev:new-game-game-server` | Run game runner in development |
-| `npm run logs:new-game` | View game logs |
+| Symptom | Cause | Solution |
+|---------|-------|----------|
+| Bets stay pending | Settlement worker stopped | Restart settlement worker |
+| Wrong payouts | Calculation error | Review outcomes service |
+| Wallet not credited | Transaction failed | Check transaction logs |
 
 ---
 
-# Appendix B: Troubleshooting
+## 10. Reference: Lotto Beast Implementation
 
-## Game doesn't appear in frontend
-
-| Check | Solution |
-|-------|----------|
-| Route registered | Verify in CasinoPage.js |
-| User is admin | Check if restriction applies |
-| Feature flag | Verify configuration |
-
-## Bets fail
-
-| Check | Solution |
-|-------|----------|
-| Setting value | Verify `new_game_enabled` = 1 |
-| Feature status | Verify allows access |
-| Logs | Check gaming service logs |
-
-## Ticks don't work
-
-| Check | Solution |
-|-------|----------|
-| Game runner | Verify it's running |
-| Database | Verify connection |
-| multiplayer_games | Verify record exists |
-
-## Settlement doesn't process
-
-| Check | Solution |
-|-------|----------|
-| Settlement worker | Verify it's running |
-| Calculations | Check for errors in multipliers |
-| Logs | Review settlement service logs |
-
----
-
-# Appendix C: Lotto Beast Reference
-
-## File Locations
+### 10.1 File Locations
 
 | Component | Path |
 |-----------|------|
@@ -1101,41 +951,79 @@ PUT /admin/waitlist_feature/new_game_room_1/bulk_grant_access
 | RNG | `gaming-service-betbr/packages/math/lotto-beast/lotto-beast-rng.js` |
 | DB Migration | `@blazecode/gaming-service-pg-controller/src/migrations/20250828120000-lotto-beast-game.js` |
 | DB Seed | `@blazecode/gaming-service-pg-controller/src/seeds/20250828120000-lotto-beast-game.js` |
-| Feature Status Seed | `@blazecode/subwriter-pg-controller/src/seeds/20251215191236-add-lotto-beast-feature-status.js` |
-| Frontend Component | `client-betbr/src/casino/originals/lotto-beast/` |
+| Feature Status | `@blazecode/subwriter-pg-controller/src/seeds/20251215191236-add-lotto-beast-feature-status.js` |
+| Frontend | `client-betbr/src/casino/originals/lotto-beast/` |
 | Socket Handler | `client-betbr/src/app/networking/socketio-blaze-originals.js` |
-| Admin Status Config | `admin-betbr/src/casino/game-status/tab-games-status/const.js` |
+| Admin Config | `admin-betbr/src/casino/game-status/tab-games-status/const.js` |
 
-## Configuration Values (Lotto Beast)
+### 10.2 Timing Configuration
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
-| `preRoundMs` | 15500 | 15.5 seconds for betting |
-| `rollingMs` | 12000 | 12 seconds for number reveal |
-| `postRoundMs` | 5000 | 5 seconds showing results |
-| `tickMs` | 1000 | Updates every 1 second |
-| `revealIntervalMs` | 2000 | Reveal 1 number every 2 seconds |
-| `minBet` | 0.1 | Minimum bet amount |
-| `maxProfit` | 5000000 | Maximum payout per round |
-| `maxBetsPerRound` | 50 | Bets limit per user per round |
+| `preRoundMs` | 15500 | 15.5 seconds betting window |
+| `rollingMs` | 12000 | 12 seconds number reveal |
+| `postRoundMs` | 5000 | 5 seconds results display |
+| `tickMs` | 1000 | 1 second update frequency |
+| `revealIntervalMs` | 2000 | 2 seconds between each number |
 
-## Multipliers (Lotto Beast)
+### 10.3 Multipliers
 
-| Bet Type | Base Multiplier | Description |
-|----------|-----------------|-------------|
-| `full_number` | 9200x | 4-digit exact match |
-| `last_3` | 920x | 3-digit match |
-| `last_2` | 92x | 2-digit match |
-| `animal` | 23x | Animal betting |
+| Bet Type | Multiplier | Description |
+|----------|------------|-------------|
+| `full_number` | 9200x | 4-digit exact match (0000-9999) |
+| `last_3` | 920x | Last 3 digits match |
+| `last_2` | 92x | Last 2 digits match |
+| `animal` | 23x | Animal betting (consecutive numbers) |
 
-## Mode Factors
+### 10.4 Mode Factors
 
-| Mode | Factor | Description |
-|------|--------|-------------|
-| `just_1st_raffle` | 1.0 | 100% of base multiplier |
-| `all_5_raffles` | 0.201 | 20.1% of base multiplier |
+| Mode | Factor | Effective Multiplier (full_number) |
+|------|--------|-----------------------------------|
+| `just_1st_raffle` | 1.0 | 9200x |
+| `all_5_raffles` | 0.201 | ~1849x |
 
 ---
 
-*Document created based on Lotto Beast implementation.*
-*Last update: January 2026*
+## 11. Executive Summary (Non-Technical)
+
+### 11.1 What This Document Covers
+
+This guide explains how to release a new game on the Blaze platform. It covers everything from initial development through production deployment with a controlled "slow release" that gradually expands access.
+
+### 11.2 Key Systems Involved
+
+Four main systems work together:
+
+1. **Gaming Service**: Runs the actual game logic (dice rolls, card deals, etc.)
+2. **Server**: Controls who can access the game (feature flags, waitlists)
+3. **Client**: The website/app players use to play
+4. **Admin Panel**: Tools for staff to manage and monitor the game
+
+### 11.3 Release Approach
+
+Games are released gradually to minimize risk:
+
+1. **Admin-Only** (Day 1): Only internal staff can play
+2. **Beta Testing** (Days 2-7): Selected users test the game
+3. **Waitlist** (Optional): Users sign up, access granted in waves
+4. **Public Release**: Everyone can play
+
+### 11.4 Why This Matters
+
+- **Reduced Risk**: Issues found early affect fewer users
+- **Better Quality**: Real feedback before wide release
+- **Controlled Load**: Servers aren't overwhelmed on day one
+- **Easy Rollback**: Problems can be fixed before they spread
+
+### 11.5 Timeline
+
+A typical game release takes 6-8 weeks:
+- Development: 2-4 weeks
+- QA/Testing: 1-2 weeks
+- Production Prep: 1 week
+- Slow Release: 1-2 weeks
+
+---
+
+*Document based on Lotto Beast implementation.*
+*Last updated: January 2026*
