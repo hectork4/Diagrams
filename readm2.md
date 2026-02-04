@@ -1,9 +1,4 @@
-sequenceDiagram
-    autonumber
-    participant SB as 🖥️ Server-betbr
-    participant SQS as 📨 AWS SQS FIFO<br/>(free-bets-grants.fifo)
-    participant GS as 🎮 Gaming-service
-    
+
     rect rgb(200, 250, 200)
         Note over SB,GS: GRANT FLOW (Happy Path)
         SB->>SQS: sendMessage({userId, gameId, rounds})
