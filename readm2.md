@@ -37,10 +37,11 @@ This guide explains how to implement and launch a new **multiplayer game** in Bl
 
 ### NPM Packages to Publish
 
-| Package | Purpose | When to Publish |
-|---------|---------|-----------------|
-| `@blazecode/gaming-service-pg-controller` | Migrations and schemas | Before deploying gaming-service |
-| `@blazecode/subwriter-pg-controller` | Feature flag seeds | Before deploying server-betbr |
+| Package | Repository | Purpose | When to Publish |
+|---------|------------|---------|-----------------|
+| `@blazecode/gaming-service-pg-controller` | gaming-service-betbr | Game/bet table migrations, enums | Before deploying gaming-service |
+| `@blazecode/subwriter-pg-controller` | server-betbr | Feature flags, waitlist seeds | Before deploying server-betbr |
+| `@blazecode/oltp-pg-controller` | server-betbr | User settings, generic configs | Only if game needs user settings |
 
 ---
 
@@ -591,21 +592,93 @@ Then update dependency in gaming-service-betbr.
 
 ## Phase 3: Server Integration (server-betbr)
 
-### Feature Flags
+The `server-betbr` repository manages feature flags, user settings, waitlists, and acts as the WebSocket bridge between gaming-service and clients. It uses two main database controllers:
 
-**Where:** `subwriter-pg-controller` (seeds)
+### NPM Packages to Modify
 
-**Flags to add:**
-- `{game}_enabled`: Master toggle for game availability
-- `{game}_visible`: Whether game appears in lobby
-- `{game}_maintenance`: For maintenance mode
+| Package | Purpose | What to Add |
+|---------|---------|-------------|
+| `@blazecode/subwriter-pg-controller` | Feature flags, waitlist, notifications | Feature status seeds, waitlist constants |
+| `@blazecode/oltp-pg-controller` | User settings, generic configs | Game-specific user settings (if needed) |
 
-### WebSocket Bridge
+### 3.1 Feature Flags (subwriter-pg-controller)
 
-**What to do:**
-1. Subscribe to Redis channel for game updates
-2. Forward `{game}:tick` events to subscribed clients
-3. Handle room subscription/unsubscription
+**Location:** `subwriter-pg-controller/seeds/feature_status.js`
+
+**What to add:**
+
+Feature flags control the gradual rollout and visibility of the game:
+
+| Flag Name | Purpose | Default |
+|-----------|---------|---------|
+| `{game}_enabled` | Master toggle - game accepts bets | `false` |
+| `{game}_visible` | Game appears in lobby/menu | `false` |
+| `{game}_maintenance` | Maintenance mode (visible but disabled) | `false` |
+| `{game}_beta` | Beta access only | `true` (initially) |
+
+**Seed format example:**
+```
+{ name: 'lotto_beast_enabled', value: false, description: 'Enable Lotto Beast game' }
+{ name: 'lotto_beast_visible', value: false, description: 'Show Lotto Beast in lobby' }
+```
+
+### 3.2 Waitlist Configuration (subwriter-pg-controller)
+
+**Location:** `subwriter-pg-controller/constants/waitlist.js` (if game has pre-launch waitlist)
+
+**What to add:**
+- Waitlist identifier constant
+- Waitlist capacity limits
+- Access rules
+
+### 3.3 User Settings (oltp-pg-controller)
+
+**Location:** `oltp-pg-controller/` (if game needs user-specific settings)
+
+**What to add (if needed):**
+- Game preferences schema
+- Default values for new users
+- Migration for settings table
+
+### 3.4 WebSocket Bridge (server-betbr code)
+
+**Location:** Server-betbr source code
+
+**What to configure:**
+1. Subscribe to Redis pub/sub channel for the game
+2. Forward tick events to clients in the game room
+3. Handle room subscription requests from clients
+4. Validate room names against allowed list
+
+### 3.5 Publishing Packages
+
+After making changes to the controllers:
+
+```bash
+# subwriter-pg-controller
+cd subwriter-pg-controller
+npm version patch
+npm publish
+
+# oltp-pg-controller (if modified)
+cd oltp-pg-controller
+npm version patch
+npm publish
+```
+
+Then update dependencies in `server-betbr`:
+```bash
+npm update @blazecode/subwriter-pg-controller
+npm update @blazecode/oltp-pg-controller
+```
+
+### 3.6 Running Migrations
+
+After deploying server-betbr with updated packages:
+```bash
+npm run migrate:subwriter
+npm run migrate:oltp  # if oltp was modified
+```
 
 ---
 
@@ -712,10 +785,15 @@ src/games/{game}/
 - [ ] Add necessary enums
 - [ ] Publish @blazecode/gaming-service-pg-controller
 
-### Development - Server
-- [ ] Add feature flag seeds
-- [ ] Configure WebSocket bridge
-- [ ] Publish @blazecode/subwriter-pg-controller
+### Development - Server (server-betbr)
+- [ ] Add feature flag seeds to `subwriter-pg-controller`
+- [ ] Add waitlist constants (if pre-launch waitlist needed)
+- [ ] Add user settings migration to `oltp-pg-controller` (if needed)
+- [ ] Configure WebSocket bridge for game room
+- [ ] Publish `@blazecode/subwriter-pg-controller`
+- [ ] Publish `@blazecode/oltp-pg-controller` (if modified)
+- [ ] Update package dependencies in server-betbr
+- [ ] Run migrations after deploy
 
 ### Development - Client
 - [ ] Create Redux slice
